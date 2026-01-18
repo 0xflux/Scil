@@ -1,5 +1,8 @@
 use alloc::{format, string::String, vec::Vec};
-use core::mem::take;
+use core::{
+    mem::take,
+    sync::atomic::{AtomicBool, Ordering},
+};
 use shared::telemetry::{Args, NtFunction, TelemetryEntry};
 use thiserror::Error;
 use wdk::println;
@@ -61,9 +64,14 @@ pub enum TelemetryError {
     FastMtxFail(String),
     #[error("failed to create a mutex via Grt")]
     GrtError(GrtError),
+    #[error("the snapshot is locked")]
+    SnapshotLocked,
+    #[error("the expected size of the buffer did not match the actual size")]
+    SizeMismatch,
 }
 
 const TELEMETRY_MTX_KEY: &str = "SCIL_LOGGING";
+const SNAPSHOT_TELEMETRY_MTX_KEY: &str = "SCIL_LOGGING_SNP";
 
 impl TelemetryCache {
     /// Creates a new instance by registering a pool managed object behind the [`wdk_mutex`] runtime, with the key found in the
@@ -76,6 +84,8 @@ impl TelemetryCache {
         {
             return Err(TelemetryError::GrtError(e));
         }
+
+        SnapshottedTelemetryLog::new()?;
 
         Ok(())
     }
@@ -120,12 +130,128 @@ impl TelemetryCache {
             )));
         };
 
-        println!("[scil] [i] Len before take: {}", lock.len());
         // SAFETY: Could this MOVE the memory under the mutex? That would lead to UB / BSOD.. however, I do not think
         // this is actually creating a new pool allocation so, should be ok if its just emptying the actual Vec.
         let drained = take(&mut *lock);
-        println!("[scil] [i] Len after take: {}", lock.len());
 
         Ok(drained)
+    }
+
+    pub fn is_empty() -> Result<bool, TelemetryError> {
+        let h_mtx = match Grt::get_fast_mutex::<Vec<TelemetryEntry>>(TELEMETRY_MTX_KEY) {
+            Ok(m) => m,
+            Err(e) => {
+                return Err(TelemetryError::GrtError(e));
+            }
+        };
+
+        let Ok(lock) = h_mtx.lock() else {
+            let irql = unsafe { KeGetCurrentIrql() };
+            return Err(TelemetryError::FastMtxFail(format!(
+                "Failed to lock mutex. IRQL is: {irql}"
+            )));
+        };
+
+        Ok(lock.is_empty())
+    }
+}
+
+/// Creates a snapshot of the active telemetry log; this will self lock in that you cannot re-snapshot until
+/// this snapshot has been drained. Failing to drain it after snapshotting will result in a perma-locked state.
+pub struct SnapshottedTelemetryLog;
+
+#[derive(Default)]
+struct SnapshottedTelemetryLogInner {
+    is_snapshotted: AtomicBool,
+    data: Vec<TelemetryEntry>,
+}
+
+impl SnapshottedTelemetryLog {
+    pub fn new() -> Result<(), TelemetryError> {
+        if let Err(e) = Grt::register_fast_mutex_checked(
+            SNAPSHOT_TELEMETRY_MTX_KEY,
+            SnapshottedTelemetryLogInner {
+                is_snapshotted: AtomicBool::new(false),
+                data: Vec::new(),
+            },
+        ) {
+            return Err(TelemetryError::GrtError(e));
+        }
+
+        Ok(())
+    }
+
+    /// Takes a snapshot of the active queue, on success returning the number of elements. The snapshot is
+    /// then held in memory until such a time as it is drained.
+    pub fn take_snapshot() -> Result<usize, TelemetryError> {
+        let h_mtx =
+            match Grt::get_fast_mutex::<SnapshottedTelemetryLogInner>(SNAPSHOT_TELEMETRY_MTX_KEY) {
+                Ok(m) => m,
+                Err(e) => {
+                    return Err(TelemetryError::GrtError(e));
+                }
+            };
+
+        let Ok(mut lock) = h_mtx.lock() else {
+            let irql = unsafe { KeGetCurrentIrql() };
+            return Err(TelemetryError::FastMtxFail(format!(
+                "Failed to lock mutex. IRQL is: {irql}"
+            )));
+        };
+
+        // If there is nothing present, just return a len of 0
+        if TelemetryCache::is_empty()? {
+            return Ok(0);
+        }
+
+        // SAFETY: We cannot race here as we are holding the outer lock via wdk_mutex::Grt
+        if lock.is_snapshotted.load(Ordering::SeqCst) == true {
+            return Err(TelemetryError::SnapshotLocked);
+        }
+
+        //
+        // At this point we know we have data in the TelemetryLog, so we need to drain it, stick it in the
+        // Snapshot, and mark as has a snapshot so we do not overwrite / mess up the held data.
+        //
+        let drained = TelemetryCache::drain()?;
+        lock.is_snapshotted.store(true, Ordering::SeqCst);
+        lock.data = drained;
+
+        // We need to return the num elements for the calling IOCTL to use to create the buffer
+        Ok(lock.data.len())
+    }
+
+    pub fn drain_snapshot(
+        expected_size: usize,
+    ) -> Result<Option<Vec<TelemetryEntry>>, TelemetryError> {
+        let h_mtx =
+            match Grt::get_fast_mutex::<SnapshottedTelemetryLogInner>(SNAPSHOT_TELEMETRY_MTX_KEY) {
+                Ok(m) => m,
+                Err(e) => {
+                    return Err(TelemetryError::GrtError(e));
+                }
+            };
+
+        let Ok(mut lock) = h_mtx.lock() else {
+            let irql = unsafe { KeGetCurrentIrql() };
+            return Err(TelemetryError::FastMtxFail(format!(
+                "Failed to lock mutex. IRQL is: {irql}"
+            )));
+        };
+
+        // If we aren't snapshotted then we have nothing pending, so return None
+        if lock.is_snapshotted.load(Ordering::SeqCst) == false {
+            return Ok(None);
+        }
+
+        // We don't want to proceed if we have bad state
+        if expected_size != lock.data.len() {
+            return Err(TelemetryError::SizeMismatch);
+        }
+
+        // Doing a mem take will reset the is_snapshotted flag from #[default]
+        let drained = take(&mut *lock);
+
+        Ok(Some(drained.data))
     }
 }

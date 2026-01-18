@@ -465,9 +465,6 @@ pub unsafe extern "system" fn syscall_handler(
         _ => (),
     };
 
-    let d = TelemetryCache::drain();
-    println!("[scil] [i] DRAINED: {d:?}");
-
     SYSCALL_ALLOW
 }
 

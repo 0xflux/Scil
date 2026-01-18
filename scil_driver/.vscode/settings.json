@@ -18,6 +18,7 @@
         "PIRP",
         "PULONG",
         "PUNICODE",
-        "serde"
+        "serde",
+        "snapshtted"
     ]
 }

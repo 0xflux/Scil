@@ -1,6 +1,6 @@
 use core::ffi::c_void;
 
-use wdk_sys::{ACCESS_MASK, HANDLE, NTSTATUS, PHANDLE, PULONG, ULONG};
+use wdk_sys::{ACCESS_MASK, HANDLE, NTSTATUS, PHANDLE, PIO_STACK_LOCATION, PIRP, PULONG, ULONG};
 
 unsafe extern "system" {
     pub unsafe fn PsGetProcessImageFileName(p_eprocess: *const c_void) -> *const c_void;
@@ -28,4 +28,16 @@ unsafe extern "system" {
         flags: ULONG,
         new_thread_handle: PHANDLE,
     ) -> NTSTATUS;
+}
+
+pub unsafe fn IoGetCurrentIrpStackLocation(irp: PIRP) -> PIO_STACK_LOCATION {
+    unsafe {
+        assert!((*irp).CurrentLocation <= (*irp).StackCount + 1);
+        (*irp)
+            .Tail
+            .Overlay
+            .__bindgen_anon_2
+            .__bindgen_anon_1
+            .CurrentStackLocation
+    }
 }

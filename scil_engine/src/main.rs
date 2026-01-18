@@ -10,7 +10,7 @@ use windows::{
     core::PCWSTR,
 };
 
-use crate::ioctl::Ioctl;
+use crate::ioctl::drain_driver_messages;
 
 mod ioctl;
 
@@ -23,7 +23,7 @@ fn run_engine() {
     let device = get_driver_handle_or_panic();
 
     loop {
-        let data = Ioctl::ioctl_drain_syscall_log(device);
+        let data = drain_driver_messages(device, None, None);
         if let Some(data) = data {
             println!("Data: {data:#?}");
         }

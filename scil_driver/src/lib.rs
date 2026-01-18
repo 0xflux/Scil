@@ -23,6 +23,7 @@ use wdk_sys::{
 mod alt_syscalls;
 mod callbacks;
 mod ffi;
+mod ioctl;
 mod scil_telemetry;
 mod utils;
 
@@ -35,6 +36,7 @@ use wdk_alloc::WdkAllocator;
 use crate::{
     alt_syscalls::AltSyscalls,
     callbacks::{image_load_callback, thread_callback},
+    ioctl::handle_ioctl,
     scil_telemetry::TelemetryCache,
 };
 
@@ -194,8 +196,4 @@ unsafe extern "C" fn scil_create_close(_device: *mut DEVICE_OBJECT, pirp: PIRP) 
     }
 
     STATUS_SUCCESS
-}
-
-unsafe extern "C" fn handle_ioctl(_device: *mut DEVICE_OBJECT, pirp: PIRP) -> NTSTATUS {
-    0
 }

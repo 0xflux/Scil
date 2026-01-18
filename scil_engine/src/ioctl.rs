@@ -3,38 +3,29 @@ use std::ffi::c_void;
 use shared::{IOCTL_DRAIN_LOG_SNAPSHOT, IOCTL_SNAPSHOT_QUE_LOG, telemetry::TelemetryEntry};
 use windows::Win32::{Foundation::HANDLE, System::IO::DeviceIoControl};
 
-/// A public 'class' (lol) for
-pub struct Ioctl;
-
-impl Ioctl {
-    pub fn ioctl_drain_syscall_log(device: HANDLE) -> Option<Vec<TelemetryEntry>> {
-        drain_driver_messages(device, None, None)
-    }
-}
-
 /// Makes an IOCTL to drain the driver messages. If no buffer is taken by this function, then
 /// the function calls to get the count.
-fn drain_driver_messages(
+pub fn drain_driver_messages(
     device: HANDLE,
-    buf: Option<Vec<TelemetryEntry>>,
-    num_elements: Option<usize>,
+    maybe_buf: Option<Vec<TelemetryEntry>>,
+    maybe_num_elements: Option<usize>,
 ) -> Option<Vec<TelemetryEntry>> {
     //
     // If the function is called with None, then we need to get the size of the buffer and have the
     // driver create a snapshot of the data.
     // This branch will then recursively call the current function to retrieve the data from the driver.
     //
-    let Some(mut buf) = buf else {
+    let Some(mut buf) = maybe_buf else {
         let mut count_items = 0usize;
 
         if let Err(e) = unsafe {
             DeviceIoControl(
                 device,
                 IOCTL_SNAPSHOT_QUE_LOG,
-                Some(&mut count_items as *mut _ as *const c_void),
-                size_of_val(&count_items) as u32,
                 None,
                 0,
+                Some(&mut count_items as *mut usize as *mut c_void),
+                size_of_val(&count_items) as u32,
                 None,
                 None,
             )
@@ -52,12 +43,10 @@ fn drain_driver_messages(
 
         let buf = Vec::<TelemetryEntry>::with_capacity(count_items);
 
-        drain_driver_messages(device, Some(buf), Some(count_items));
-        return None;
+        return drain_driver_messages(device, Some(buf), Some(count_items));
     };
 
-    let Some(num_elements) = num_elements else {
-        println!("[-] num_elements was empty.");
+    let Some(num_elements) = maybe_num_elements else {
         return None;
     };
 
@@ -70,10 +59,10 @@ fn drain_driver_messages(
         DeviceIoControl(
             device,
             IOCTL_DRAIN_LOG_SNAPSHOT,
-            Some(buf.as_mut_ptr() as *mut _ as *const c_void),
+            Some(&num_elements as *const usize as _),
+            size_of::<usize>() as _,
+            Some(buf.as_mut_ptr() as *mut _ as *mut c_void),
             sz as u32,
-            None,
-            0,
             None,
             None,
         )
@@ -84,6 +73,9 @@ fn drain_driver_messages(
         );
         return None;
     };
+
+    // SAFETY: We fill the buffer manually through the IOCTL, so we just need to set the length
+    unsafe { buf.set_len(num_elements) };
 
     Some(buf)
 }
