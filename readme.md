@@ -8,7 +8,7 @@ only particular System Service Numbers to hook.
 
 ## Demo
 
-Demo of logging syscalls:
+Video demo of logging syscalls (YouTube):
 
 [![SCIL Logging Demo](https://img.youtube.com/vi/Xl5azIpD5Aw/0.jpg)](https://www.youtube.com/watch?v=Xl5azIpD5Aw)
 
