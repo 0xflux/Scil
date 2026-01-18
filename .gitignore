@@ -1,0 +1,3 @@
+scil_driver/target/*
+scil_test/target/*
+scil_engine/target/*

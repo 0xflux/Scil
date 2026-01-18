@@ -1,0 +1,5 @@
+[build]
+rustflags = [
+    "-C", "target-feature=+crt-static",
+    "--cfg", 'driver_model__driver_type="WDM"'
+]

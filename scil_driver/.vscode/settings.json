@@ -1,0 +1,23 @@
+{
+    "rust-analyzer.cargo.target": "x86_64-pc-windows-msvc",
+    // "rust-analyzer.checkOnSave.command": "clippy",
+    "[rust]": {
+        "editor.defaultFormatter": "rust-lang.rust-analyzer",
+        "editor.formatOnSave": true,
+    },
+    "cSpell.words": [
+        "eprocess",
+        "Irql",
+        "KTHREAD",
+        "KTRAP",
+        "ntddk",
+        "NTSTATUS",
+        "PCUNICODE",
+        "PDEVICE",
+        "PHANDLE",
+        "PIRP",
+        "PULONG",
+        "PUNICODE",
+        "serde"
+    ]
+}
