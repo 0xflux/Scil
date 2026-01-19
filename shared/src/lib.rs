@@ -24,3 +24,7 @@ pub const IOCTL_DRAIN_LOG_SNAPSHOT: u32 =
 /// Snapshots the current queue, returning the count of queued items
 pub const IOCTL_SNAPSHOT_QUE_LOG: u32 =
     CTL_CODE!(FILE_DEVICE_UNKNOWN, 0x801, METHOD_BUFFERED, FILE_ANY_ACCESS);
+
+/// Awaits a PSO (Pending Syscall Object) event being handled
+pub const AWAIT_PSO: u32 =
+    CTL_CODE!(FILE_DEVICE_UNKNOWN, 0x802, METHOD_BUFFERED, FILE_ANY_ACCESS);

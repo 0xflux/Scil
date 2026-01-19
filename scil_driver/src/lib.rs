@@ -2,12 +2,11 @@
 #![feature(map_try_insert)]
 extern crate alloc;
 
-use core::{iter::once, ptr::null_mut};
-
 use alloc::vec::Vec;
+use core::{iter::once, ptr::null_mut, sync::atomic::AtomicPtr};
 use shared::{DOS_DEVICE_NAME, NT_DEVICE_NAME};
 use wdk::{nt_success, println};
-use wdk_mutex::grt::Grt;
+use wdk_mutex::{fast_mutex::FastMutex, grt::Grt};
 use wdk_sys::{
     DEVICE_OBJECT, DO_BUFFERED_IO, DRIVER_OBJECT, FILE_DEVICE_SECURE_OPEN, FILE_DEVICE_UNKNOWN,
     IO_NO_INCREMENT, IRP_MJ_CLOSE, IRP_MJ_CREATE, IRP_MJ_DEVICE_CONTROL, NTSTATUS,
@@ -36,13 +35,17 @@ use wdk_alloc::WdkAllocator;
 use crate::{
     alt_syscalls::AltSyscalls,
     callbacks::{image_load_callback, thread_callback},
-    ioctl::handle_ioctl,
+    ioctl::{drop_pirp_queue, handle_ioctl, init_pirp_queue},
     scil_telemetry::TelemetryCache,
 };
 
 #[cfg(not(test))]
 #[global_allocator]
 static GLOBAL_ALLOCATOR: WdkAllocator = WdkAllocator;
+
+pub type PsoQueue = Vec<PIRP>;
+// TODO will be more performant to use the PIRP linked lists but this is less effort for now
+pub static G_PSO_IOCTL_QUEUE: AtomicPtr<FastMutex<PsoQueue>> = AtomicPtr::new(null_mut());
 
 #[unsafe(export_name = "DriverEntry")]
 pub unsafe extern "system" fn driver_entry(
@@ -67,6 +70,13 @@ pub unsafe extern "system" fn driver_entry(
     // Set up wdk-mutex
     if let Err(e) = Grt::init() {
         println!("Error creating Grt!: {:?}", e);
+        return STATUS_UNSUCCESSFUL;
+    }
+
+    // Set up the PIRP queue for fast IOCTL dispatch with syscall events
+    if let Err(e) = init_pirp_queue() {
+        println!("Failed to create FastMutex for init_pirp_queue(). {e:?}");
+        driver_exit(driver);
         return STATUS_UNSUCCESSFUL;
     }
 
@@ -102,6 +112,7 @@ extern "C" fn driver_exit(driver: *mut DRIVER_OBJECT) {
     // Destroy driver internals
     //
 
+    drop_pirp_queue();
     let _ = unsafe { Grt::destroy() };
     AltSyscalls::uninstall();
     let _ = unsafe { PsRemoveLoadImageNotifyRoutine(Some(image_load_callback)) };

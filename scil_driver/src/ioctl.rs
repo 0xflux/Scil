@@ -1,15 +1,22 @@
-use core::{ffi::c_void, ptr::null_mut};
+use core::{ffi::c_void, ptr::null_mut, sync::atomic::Ordering};
 
-use shared::{IOCTL_DRAIN_LOG_SNAPSHOT, IOCTL_SNAPSHOT_QUE_LOG, telemetry::TelemetryEntry};
+use alloc::boxed::Box;
+use shared::{
+    AWAIT_PSO, IOCTL_DRAIN_LOG_SNAPSHOT, IOCTL_SNAPSHOT_QUE_LOG, telemetry::TelemetryEntry,
+};
 use wdk::println;
+use wdk_mutex::{errors::DriverMutexError, fast_mutex::FastMutex};
 use wdk_sys::{
     _IO_STACK_LOCATION, DEVICE_OBJECT, IO_NO_INCREMENT, NTSTATUS, PIRP, STATUS_BAD_DATA,
-    STATUS_BUFFER_ALL_ZEROS, STATUS_INVALID_BUFFER_SIZE, STATUS_NOT_SUPPORTED, STATUS_SUCCESS,
-    STATUS_UNSUCCESSFUL,
+    STATUS_BUFFER_ALL_ZEROS, STATUS_INVALID_BUFFER_SIZE, STATUS_NOT_SUPPORTED, STATUS_PENDING,
+    STATUS_SUCCESS, STATUS_UNSUCCESSFUL,
     ntddk::{IofCompleteRequest, RtlCopyMemoryNonTemporal},
 };
 
-use crate::{ffi::IoGetCurrentIrpStackLocation, scil_telemetry::SnapshottedTelemetryLog};
+use crate::{
+    G_PSO_IOCTL_QUEUE, PsoQueue, ffi::IoGetCurrentIrpStackLocation,
+    scil_telemetry::SnapshottedTelemetryLog,
+};
 
 pub unsafe extern "C" fn handle_ioctl(_device: *mut DEVICE_OBJECT, pirp: PIRP) -> NTSTATUS {
     let p_stack_location: *mut _IO_STACK_LOCATION = unsafe { IoGetCurrentIrpStackLocation(pirp) };
@@ -92,6 +99,15 @@ pub unsafe extern "C" fn handle_ioctl(_device: *mut DEVICE_OBJECT, pirp: PIRP) -
 
                 STATUS_SUCCESS
             }
+            AWAIT_PSO => {
+                //
+                // Await the PSO (Pending Syscall Object) being available, then once it is via an event, return
+                // the object to the calling thread in user-mode. The PSO will be a fixed size, and each event will
+                // deal with only one syscall interrupt so we do not need a second call to deal with buffer size.
+                //
+
+                STATUS_PENDING
+            }
             _ => STATUS_NOT_SUPPORTED,
         };
 
@@ -102,6 +118,28 @@ pub unsafe extern "C" fn handle_ioctl(_device: *mut DEVICE_OBJECT, pirp: PIRP) -
 
     return_status
 }
+
+pub fn init_pirp_queue() -> Result<(), DriverMutexError> {
+    // Check it is not already registered.. ideally should return a more expressive error but fine for POC
+    if G_PSO_IOCTL_QUEUE.load(Ordering::SeqCst).is_null() {
+        let fm = Box::new(FastMutex::new(PsoQueue::new())?);
+        let p_fm = Box::into_raw(fm);
+        G_PSO_IOCTL_QUEUE.store(p_fm, Ordering::SeqCst);
+    }
+
+    Ok(())
+}
+
+pub fn drop_pirp_queue() {
+    let p_queue = G_PSO_IOCTL_QUEUE.load(Ordering::SeqCst);
+    if !p_queue.is_null() {
+        let fm = unsafe { Box::from_raw(p_queue) };
+        drop(fm);
+        G_PSO_IOCTL_QUEUE.store(null_mut(), Ordering::SeqCst);
+    }
+}
+
+fn queue_pso_ioctl(pirp: PIRP) {}
 
 struct IoctlBuffer {
     len: u32,
