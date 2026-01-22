@@ -6,48 +6,67 @@ use shared::{
 };
 use windows::{
     Win32::{
-        Foundation::{ERROR_IO_PENDING, HANDLE},
-        System::IO::{DeviceIoControl, OVERLAPPED},
+        Foundation::{CloseHandle, ERROR_IO_PENDING, HANDLE},
+        System::{
+            IO::{DeviceIoControl, OVERLAPPED},
+            Threading::CreateEventW,
+        },
     },
     core::HRESULT,
 };
 
-pub fn overlapped(device: HANDLE) {
-    let mut i = 0;
-    while i < 1000 {
-        let mut args_out = Args::default();
-        let mut overlapped: OVERLAPPED = OVERLAPPED::default();
+pub struct QueuedIoctl {
+    pub out: Args,
+    pub overlapped: OVERLAPPED,
+    pub event: HANDLE,
+}
 
-        let status = unsafe {
-            DeviceIoControl(
-                device,
-                AWAIT_PSO,
-                None,
-                0,
-                Some(&mut args_out as *mut _ as _),
-                size_of::<Args>() as u32,
-                None,
-                Some(&mut overlapped),
-            )
-        };
+pub fn queue_ioctl(device: HANDLE) -> Result<Option<Box<QueuedIoctl>>, windows::core::Error> {
+    let event = unsafe { CreateEventW(None, false, false, None)? };
 
-        match status {
-            Ok(()) => {
-                println!("[i] IOCTL completed immediately");
+    let mut b = Box::new(QueuedIoctl {
+        out: Args::default(),
+        overlapped: OVERLAPPED::default(),
+        event,
+    });
+
+    b.overlapped.hEvent = b.event;
+
+    let status = unsafe {
+        DeviceIoControl(
+            device,
+            AWAIT_PSO,
+            None,
+            0,
+            Some(&mut b.out as *mut _ as _),
+            size_of::<Args>() as u32,
+            None,
+            Some(&mut b.overlapped),
+        )
+    };
+
+    match status {
+        Ok(()) => {
+            println!("[i] IOCTL completed immediately");
+            unsafe {
+                let _ = CloseHandle(event);
             }
-            Err(e) => {
-                let code: HRESULT = e.code();
+            return Ok(None);
+        }
+        Err(e) => {
+            let code: HRESULT = e.code();
 
-                if code == ERROR_IO_PENDING.to_hresult() {
-                    println!("[+] IRP queued (overlapped): ERROR_IO_PENDING");
-                } else {
-                    println!("[-] DeviceIoControl failed: {e:?}");
+            if code != ERROR_IO_PENDING.to_hresult() {
+                unsafe {
+                    let _ = CloseHandle(event);
                 }
+                println!("[-] DeviceIoControl failed: {e:?}");
+                return Err(e);
             }
         }
-
-        i += 1;
     }
+
+    return Ok(Some(b));
 }
 
 /// Makes an IOCTL to drain the driver messages. If no buffer is taken by this function, then

@@ -1,11 +1,15 @@
 //! For enabling / disabling alt syscalls
 
-use core::{arch::asm, ffi::c_void, ptr::null_mut};
+use core::{arch::asm, ffi::c_void, ptr::null_mut, sync::atomic::Ordering};
 
+use shared::telemetry::Args;
 use wdk::println;
-use wdk_sys::{_KTRAP_FRAME, KTRAP_FRAME};
+use wdk_sys::{
+    ntddk::{IoCsqRemoveNextIrp, IofCompleteRequest, RtlCopyMemoryNonTemporal},
+    IO_NO_INCREMENT, KTRAP_FRAME, STATUS_SUCCESS, _KTRAP_FRAME,
+};
 
-use crate::utils::get_process_name_and_pid;
+use crate::{utils::get_process_name_and_pid, SCIL_DRIVER_EXT};
 
 pub const SSN_NT_OPEN_PROCESS: u32 = 0x26;
 pub const SSN_NT_ALLOCATE_VIRTUAL_MEMORY: u32 = 0x18;
@@ -71,22 +75,43 @@ pub unsafe extern "system" fn syscall_handler(
         | SSN_NT_CREATE_THREAD_EX => {
             // TODO from here, grab the list of pending PIRPs and use them to send syscall events to the user app
 
-            // let pirp = unsafe { IoCsqRemoveNextIrp() };
+            let p_scil_object = SCIL_DRIVER_EXT.load(Ordering::SeqCst);
+            if !p_scil_object.is_null() {
+                let pirp = unsafe {
+                    IoCsqRemoveNextIrp(&raw mut (*p_scil_object).cancel_safe_queue, null_mut())
+                };
 
-            // println!("[scil] [i] SSN: {:#X}", ssn);
-            // if let Err(e) = TelemetryCache::push(TelemetryEntry::new(
-            //     NtFunction::NtOpenProcess,
-            //     Args {
-            //         rcx: Some(ktrap_frame.Rcx as usize),
-            //         rdx: Some(ktrap_frame.Rdx as usize),
-            //         r8: Some(ktrap_frame.R8 as usize),
-            //         r9: Some(ktrap_frame.R9 as usize),
-            //         ..Default::default()
-            //     },
-            //     pid,
-            // )) {
-            //     println!("[scil] [-] Failed to push syscall object. {e}");
-            // };
+                if pirp.is_null() {
+                    println!("[scil] [i] PIRP was null in syscall.");
+                    return SYSCALL_ALLOW;
+                }
+
+                let data = Args {
+                    rcx: Some(ktrap_frame.Rcx as _),
+                    rdx: Some(ktrap_frame.Rdx as _),
+                    r8: Some(ktrap_frame.R8 as _),
+                    r9: Some(ktrap_frame.R9 as _),
+                    stack1: None,
+                    stack2: None,
+                    stack3: None,
+                    stack4: None,
+                    stack5: None,
+                    stack6: None,
+                    stack7: None,
+                };
+                let data_sz = size_of::<Args>();
+                unsafe { (*pirp).IoStatus.Information = data_sz as _ };
+
+                unsafe {
+                    RtlCopyMemoryNonTemporal(
+                        (*pirp).AssociatedIrp.SystemBuffer,
+                        &data as *const _ as *const c_void,
+                        data_sz as _,
+                    )
+                };
+                unsafe { (*pirp).IoStatus.__bindgen_anon_1.Status = STATUS_SUCCESS };
+                unsafe { IofCompleteRequest(pirp, IO_NO_INCREMENT as i8) };
+            }
         }
         _ => (),
     };

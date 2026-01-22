@@ -6,7 +6,9 @@
         "editor.formatOnSave": true,
     },
     "cSpell.words": [
+        "Deque",
         "hresult",
-        "PCWSTR"
+        "PCWSTR",
+        "vecdeque"
     ]
 }
