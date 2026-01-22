@@ -40,7 +40,7 @@ fn run_engine() {
     println!("[+] IOCTL pending buffers queued.");
 
     // TODO put on new thread, maybe a tokio select thereafter?
-    let _ = drain_pending_one_at_a_time(device, &mut queued_events);
+    let _ = monitor_driver_intercept(device, &mut queued_events);
 
     // TODO put on new thread, maybe a tokio select thereafter?
     loop {
@@ -76,7 +76,11 @@ fn driver_name() -> Vec<u16> {
     DRIVER_NAME.encode_utf16().chain(once(0)).collect()
 }
 
-fn drain_pending_one_at_a_time(
+/// Monitors the interception events from syscalls by the driver.
+///
+/// The function loops over all pending IRP's for a signalled event indicating one of them
+/// has completed.
+fn monitor_driver_intercept(
     device: HANDLE,
     pending: &mut VecDeque<Box<QueuedIoctl>>,
 ) -> Result<Vec<Args>, windows::core::Error> {
@@ -99,6 +103,11 @@ fn drain_pending_one_at_a_time(
 
         println!("GOT COMPLETED: {:#?}", taken.out);
         completed.push(taken.out);
+
+        //
+        // TODO now we need to push another pending ioctl into the driver; except maybe we want to do this immediately
+        // after we pass the wait check for sp33d
+        //
     }
 
     Ok(completed)
