@@ -8,8 +8,9 @@ use shared::telemetry::{
 };
 use wdk::println;
 use wdk_sys::{
-    _KTRAP_FRAME, IO_NO_INCREMENT, KTRAP_FRAME, STATUS_SUCCESS,
-    ntddk::{IoCsqRemoveNextIrp, IofCompleteRequest, RtlCopyMemoryNonTemporal},
+    _EVENT_TYPE::NotificationEvent,
+    _KTRAP_FRAME, FALSE, IO_NO_INCREMENT, KEVENT, KTRAP_FRAME, STATUS_SUCCESS,
+    ntddk::{IoCsqRemoveNextIrp, IofCompleteRequest, KeInitializeEvent, RtlCopyMemoryNonTemporal},
 };
 
 use crate::{
@@ -100,7 +101,7 @@ pub unsafe extern "system" fn syscall_handler(
                     pid,
                 );
 
-                let data_sz = size_of::<Args>();
+                let data_sz = size_of::<TelemetryEntry>();
                 unsafe { (*pirp).IoStatus.Information = data_sz as _ };
 
                 unsafe {
@@ -112,6 +113,18 @@ pub unsafe extern "system" fn syscall_handler(
                 };
                 unsafe { (*pirp).IoStatus.__bindgen_anon_1.Status = STATUS_SUCCESS };
                 unsafe { IofCompleteRequest(pirp, IO_NO_INCREMENT as i8) };
+
+                //
+                // Here we deal with suspending the thread using a NotificationEvent type of KEVENT,
+                // in which we wait for the EDR running in VTL1 / PPL / our simulation normal process
+                // to signal (via an IOCTL) that the process is ok to continue and the EDR has done its
+                // jam. We can coordinate this by sticking the event into the pool and tracking the event
+                // based on the event UUID we generated.
+                //
+                // let mut k = KEVENT::default();
+                // unsafe {
+                //     KeInitializeEvent(&mut k, NotificationEvent, FALSE as u8);
+                // }
             }
         }
         _ => (),
