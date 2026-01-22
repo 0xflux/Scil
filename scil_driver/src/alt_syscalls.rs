@@ -11,8 +11,8 @@ use wdk_sys::{
     DISPATCHER_HEADER, DRIVER_OBJECT, HANDLE, KTRAP_FRAME, OBJ_KERNEL_HANDLE, PETHREAD, PKTHREAD,
     PROCESS_ALL_ACCESS, PsThreadType, THREAD_ALL_ACCESS,
     ntddk::{
-        IoGetCurrentProcess, IoThreadToProcess, ObReferenceObjectByHandle, ObfDereferenceObject,
-        ZwClose,
+        IoCsqRemoveNextIrp, IoGetCurrentProcess, IoThreadToProcess, ObReferenceObjectByHandle,
+        ObfDereferenceObject, ZwClose,
     },
 };
 
@@ -447,20 +447,24 @@ pub unsafe extern "system" fn syscall_handler(
         | SSN_NT_ALLOCATE_VIRTUAL_MEMORY
         | SSN_NT_WRITE_VM
         | SSN_NT_CREATE_THREAD_EX => {
+            // TODO from here, grab the list of pending PIRPs and use them to send syscall events to the user app
+
+            // let pirp = unsafe { IoCsqRemoveNextIrp() };
+
             // println!("[scil] [i] SSN: {:#X}", ssn);
-            if let Err(e) = TelemetryCache::push(TelemetryEntry::new(
-                NtFunction::NtOpenProcess,
-                Args {
-                    rcx: Some(ktrap_frame.Rcx as usize),
-                    rdx: Some(ktrap_frame.Rdx as usize),
-                    r8: Some(ktrap_frame.R8 as usize),
-                    r9: Some(ktrap_frame.R9 as usize),
-                    ..Default::default()
-                },
-                pid,
-            )) {
-                println!("[scil] [-] Failed to push syscall object. {e}");
-            };
+            // if let Err(e) = TelemetryCache::push(TelemetryEntry::new(
+            //     NtFunction::NtOpenProcess,
+            //     Args {
+            //         rcx: Some(ktrap_frame.Rcx as usize),
+            //         rdx: Some(ktrap_frame.Rdx as usize),
+            //         r8: Some(ktrap_frame.R8 as usize),
+            //         r9: Some(ktrap_frame.R9 as usize),
+            //         ..Default::default()
+            //     },
+            //     pid,
+            // )) {
+            //     println!("[scil] [-] Failed to push syscall object. {e}");
+            // };
         }
         _ => (),
     };

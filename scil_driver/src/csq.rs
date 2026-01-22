@@ -1,17 +1,18 @@
 use core::{
     mem::MaybeUninit,
     ptr::{addr_of_mut, null_mut},
+    sync::atomic::Ordering,
 };
 
 use wdk_sys::{
     _IO_CSQ, IO_CSQ, IO_NO_INCREMENT, IRP, KIRQL, LIST_ENTRY, NTSTATUS, PIO_CSQ, PIRP, PLIST_ENTRY,
-    PVOID, STATUS_CANCELLED, STATUS_SUCCESS,
+    PVOID, STATUS_CANCELLED, STATUS_SUCCESS, STATUS_UNSUCCESSFUL,
     ntddk::{
         IofCompleteRequest, KeAcquireSpinLockRaiseToDpc, KeLowerIrql, KeReleaseSpinLockFromDpcLevel,
     },
 };
 
-use crate::ScilDriverExtension;
+use crate::SCIL_DRIVER_EXT;
 
 #[allow(non_snake_case)]
 pub unsafe extern "C" fn CsqInsertIrp(
@@ -20,7 +21,10 @@ pub unsafe extern "C" fn CsqInsertIrp(
     _insert_context: PVOID,
 ) -> NTSTATUS {
     unsafe {
-        let p_driver_ext = get_containing_record(csq);
+        let p_driver_ext = SCIL_DRIVER_EXT.load(Ordering::SeqCst);
+        if p_driver_ext.is_null() {
+            return STATUS_UNSUCCESSFUL;
+        }
 
         //
         // Insert the irp to the tail, to act as a queue
@@ -37,15 +41,23 @@ pub unsafe extern "C" fn CsqInsertIrp(
 #[allow(non_snake_case)]
 pub unsafe extern "C" fn CsqAcquireLock(csq: PIO_CSQ, old_irql: *mut KIRQL) {
     unsafe {
-        let ext = get_containing_record(csq);
-        *old_irql = KeAcquireSpinLockRaiseToDpc(&mut (*ext).csq_lock);
+        let p_scil_struct = SCIL_DRIVER_EXT.load(Ordering::SeqCst);
+        if p_scil_struct.is_null() {
+            return;
+        }
+
+        *old_irql = KeAcquireSpinLockRaiseToDpc(&mut (*p_scil_struct).csq_lock);
     }
 }
 
 #[allow(non_snake_case)]
 pub unsafe extern "C" fn CsqReleaseLock(csq: PIO_CSQ, old_irql: KIRQL) {
     unsafe {
-        let ext = get_containing_record(csq);
+        let ext = SCIL_DRIVER_EXT.load(Ordering::SeqCst);
+        if ext.is_null() {
+            return;
+        }
+
         KeReleaseSpinLockFromDpcLevel(&mut (*ext).csq_lock);
         KeLowerIrql(old_irql);
     }
@@ -58,20 +70,6 @@ pub unsafe extern "C" fn CsqCompleteCanceledIrp(_csq: PIO_CSQ, irp: PIRP) {
         (*irp).IoStatus.Information = 0;
         IofCompleteRequest(irp, IO_NO_INCREMENT as i8);
     }
-}
-
-#[inline(always)]
-fn offset_of_ext_csq() -> usize {
-    let uninit = MaybeUninit::<ScilDriverExtension>::uninit();
-    let base = uninit.as_ptr() as usize;
-    let field = unsafe { &(*uninit.as_ptr()).cancel_safe_queue as *const IO_CSQ as usize };
-    field - base
-}
-
-#[inline(always)]
-unsafe fn get_containing_record(csq: PIO_CSQ) -> *mut ScilDriverExtension {
-    let off = offset_of_ext_csq();
-    (unsafe { (csq as *mut u8).offset(-(off as isize)) }) as *mut ScilDriverExtension
 }
 
 #[allow(non_snake_case)]
@@ -107,9 +105,13 @@ unsafe fn irp_list_entry(irp: PIRP) -> PLIST_ENTRY {
 }
 
 #[allow(non_snake_case)]
+/// SAFETY: Can return null
 pub unsafe extern "C" fn CsqPeekNextIrp(csq: PIO_CSQ, irp: PIRP, _peek_context: PVOID) -> PIRP {
     unsafe {
-        let p_device_ext = get_containing_record(csq);
+        let p_device_ext = SCIL_DRIVER_EXT.load(Ordering::SeqCst);
+        if p_device_ext.is_null() {
+            return null_mut();
+        }
 
         if IsListEmpty(&mut (*p_device_ext).irp_queue_list) {
             // no pending IRPs

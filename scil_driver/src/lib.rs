@@ -2,15 +2,16 @@
 #![feature(map_try_insert)]
 extern crate alloc;
 
-use alloc::vec::Vec;
+use alloc::{boxed::Box, vec::Vec};
 use core::{
     iter::once,
+    mem::zeroed,
     ptr::null_mut,
-    sync::atomic::{AtomicI32, AtomicPtr},
+    sync::atomic::{AtomicI32, AtomicPtr, Ordering},
 };
 use shared::{DOS_DEVICE_NAME, NT_DEVICE_NAME};
 use wdk::{nt_success, println};
-use wdk_mutex::{fast_mutex::FastMutex, grt::Grt};
+use wdk_mutex::grt::Grt;
 use wdk_sys::{
     DEVICE_OBJECT, DO_BUFFERED_IO, DRIVER_OBJECT, FILE_DEVICE_SECURE_OPEN, FILE_DEVICE_UNKNOWN,
     IO_CSQ, IO_NO_INCREMENT, IRP_MJ_CLOSE, IRP_MJ_CREATE, IRP_MJ_DEVICE_CONTROL, KSPIN_LOCK,
@@ -26,6 +27,7 @@ use wdk_sys::{
 
 mod alt_syscalls;
 mod callbacks;
+mod csil_api;
 mod csq;
 mod ffi;
 mod ioctl;
@@ -65,6 +67,8 @@ pub struct ScilDriverExtension {
     /// Number of Irps in the queue in pending state
     pub num_queued_irps: AtomicI32,
 }
+
+pub static SCIL_DRIVER_EXT: AtomicPtr<ScilDriverExtension> = AtomicPtr::new(null_mut());
 
 #[unsafe(export_name = "DriverEntry")]
 pub unsafe extern "system" fn driver_entry(
@@ -129,6 +133,12 @@ extern "C" fn driver_exit(driver: *mut DRIVER_OBJECT) {
     let _ = unsafe { PsRemoveLoadImageNotifyRoutine(Some(image_load_callback)) };
     let _ = unsafe { PsRemoveCreateThreadNotifyRoutine(Some(thread_callback)) };
 
+    let raw_p = SCIL_DRIVER_EXT.load(Ordering::SeqCst);
+    if !raw_p.is_null() {
+        let p = unsafe { Box::from_raw(raw_p) };
+        drop(p);
+    }
+
     //
     // Delete the driver object
     //
@@ -171,7 +181,7 @@ pub unsafe extern "C" fn configure_driver(
     let res = unsafe {
         IoCreateDevice(
             driver,
-            size_of::<ScilDriverExtension>() as u32,
+            0,
             &mut nt_name,
             FILE_DEVICE_UNKNOWN, // If a type of hardware does not match any of the defined types, specify a value of either FILE_DEVICE_UNKNOWN
             FILE_DEVICE_SECURE_OPEN,
@@ -189,13 +199,18 @@ pub unsafe extern "C" fn configure_driver(
     // Initialise the device extension for the Csq
     //
     unsafe {
-        let p_device_ext = (*device_object).DeviceExtension as *mut ScilDriverExtension;
+        let mut device_ext = Box::new(ScilDriverExtension {
+            irp_queue_list: zeroed(),
+            cancel_safe_queue: zeroed(),
+            csq_lock: 0,
+            num_queued_irps: AtomicI32::new(0),
+        });
 
-        InitializeListHead(&raw mut (*p_device_ext).irp_queue_list);
-        KeInitializeSpinLock(&raw mut (*p_device_ext).csq_lock);
+        InitializeListHead(&raw mut device_ext.irp_queue_list);
+        KeInitializeSpinLock(&raw mut device_ext.csq_lock);
 
         let result = IoCsqInitializeEx(
-            &raw mut (*p_device_ext).cancel_safe_queue,
+            &raw mut device_ext.cancel_safe_queue,
             Some(CsqInsertIrp),
             Some(CsqRemoveIrp),
             Some(CsqPeekNextIrp),
@@ -208,6 +223,11 @@ pub unsafe extern "C" fn configure_driver(
             println!("[scil] [-] Failed to initialise Csq. {result:#X}");
             return result;
         }
+
+        // SAFETY: The size of the box does not change over time as all types are fixed
+        // sizes that cannot grow, so turning this into a raw pointer is safe.
+        let p_device_ext = Box::into_raw(device_ext);
+        SCIL_DRIVER_EXT.store(p_device_ext, Ordering::SeqCst);
     }
 
     //

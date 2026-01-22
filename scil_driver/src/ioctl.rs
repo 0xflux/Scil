@@ -16,7 +16,7 @@ use wdk_sys::{
 };
 
 use crate::{
-    ScilDriverExtension, csq::CsqInsertIrp, ffi::IoGetCurrentIrpStackLocation,
+    SCIL_DRIVER_EXT, ScilDriverExtension, csq::CsqInsertIrp, ffi::IoGetCurrentIrpStackLocation,
     scil_telemetry::SnapshottedTelemetryLog,
 };
 
@@ -130,8 +130,14 @@ pub unsafe extern "C" fn handle_ioctl(device: *mut DEVICE_OBJECT, pirp: PIRP) ->
 ///
 /// Callers of this function must ensure you return from its call stack WITHOUT calling `IofCompleteRequest`,
 /// unless you have dealt with the event that causes the IRP to complete.
-unsafe fn queue_pso_ioctl(ioctl_buffer: IoctlBuffer, p_device: *mut DEVICE_OBJECT) -> NTSTATUS {
-    let p_device_ext = unsafe { (*p_device).DeviceExtension } as *mut ScilDriverExtension;
+unsafe fn queue_pso_ioctl(ioctl_buffer: IoctlBuffer, _p_device: *mut DEVICE_OBJECT) -> NTSTATUS {
+    let p_device_ext = SCIL_DRIVER_EXT.load(Ordering::SeqCst);
+    if p_device_ext.is_null() {
+        println!("[scil] [-] SCIL_DRIVER_EXT was unexpectedly null.");
+        unsafe { (*ioctl_buffer.pirp).IoStatus.__bindgen_anon_1.Status = STATUS_INVALID_PARAMETER };
+        unsafe { IofCompleteRequest(ioctl_buffer.pirp, IO_NO_INCREMENT as i8) };
+        return STATUS_INVALID_PARAMETER;
+    }
 
     if ioctl_buffer.p_stack_location.is_null() || ioctl_buffer.pirp.is_null() {
         println!("[scil] [-] PIRP was null in AWAIT_PSO.");
@@ -173,12 +179,6 @@ unsafe fn queue_pso_ioctl(ioctl_buffer: IoctlBuffer, p_device: *mut DEVICE_OBJEC
         unsafe { IofCompleteRequest(ioctl_buffer.pirp, IO_NO_INCREMENT as i8) };
         return STATUS_UNSUCCESSFUL;
     }
-
-    println!("[scil] [+] Pushed Irp.");
-
-    println!("[scil] [i] Queued IRPs b4: {}", unsafe {
-        (*p_device_ext).num_queued_irps.load(Ordering::SeqCst)
-    });
 
     unsafe {
         (*p_device_ext)

@@ -1,47 +1,52 @@
 use std::ffi::c_void;
 
 use shared::{
-    telemetry::{Args, TelemetryEntry},
     AWAIT_PSO, IOCTL_DRAIN_LOG_SNAPSHOT, IOCTL_SNAPSHOT_QUE_LOG,
+    telemetry::{Args, TelemetryEntry},
 };
 use windows::{
-    core::HRESULT,
     Win32::{
         Foundation::{ERROR_IO_PENDING, HANDLE},
         System::IO::{DeviceIoControl, OVERLAPPED},
     },
+    core::HRESULT,
 };
 
 pub fn overlapped(device: HANDLE) {
-    let mut args_out = Args::default();
-    let mut overlapped: OVERLAPPED = OVERLAPPED::default();
+    let mut i = 0;
+    while i < 1000 {
+        let mut args_out = Args::default();
+        let mut overlapped: OVERLAPPED = OVERLAPPED::default();
 
-    let status = unsafe {
-        DeviceIoControl(
-            device,
-            AWAIT_PSO,
-            None,
-            0,
-            Some(&mut args_out as *mut _ as _),
-            size_of::<Args>() as u32,
-            None,
-            Some(&mut overlapped),
-        )
-    };
+        let status = unsafe {
+            DeviceIoControl(
+                device,
+                AWAIT_PSO,
+                None,
+                0,
+                Some(&mut args_out as *mut _ as _),
+                size_of::<Args>() as u32,
+                None,
+                Some(&mut overlapped),
+            )
+        };
 
-    match status {
-        Ok(()) => {
-            println!("[i] IOCTL completed immediately");
-        }
-        Err(e) => {
-            let code: HRESULT = e.code();
+        match status {
+            Ok(()) => {
+                println!("[i] IOCTL completed immediately");
+            }
+            Err(e) => {
+                let code: HRESULT = e.code();
 
-            if code == ERROR_IO_PENDING.to_hresult() {
-                println!("[+] IRP queued (overlapped): ERROR_IO_PENDING");
-            } else {
-                println!("[-] DeviceIoControl failed: {e:?}");
+                if code == ERROR_IO_PENDING.to_hresult() {
+                    println!("[+] IRP queued (overlapped): ERROR_IO_PENDING");
+                } else {
+                    println!("[-] DeviceIoControl failed: {e:?}");
+                }
             }
         }
+
+        i += 1;
     }
 }
 
