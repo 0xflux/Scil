@@ -5,7 +5,6 @@ use core::{
 };
 use shared::telemetry::{Args, NtFunction, TelemetryEntry};
 use thiserror::Error;
-use wdk::println;
 use wdk_mutex::{errors::GrtError, grt::Grt};
 use wdk_sys::{
     _LARGE_INTEGER,

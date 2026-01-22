@@ -1,23 +1,19 @@
 use core::{ffi::c_void, ptr::null_mut, sync::atomic::Ordering};
 
-use alloc::boxed::Box;
 use shared::{
-    AWAIT_PSO, IOCTL_DRAIN_LOG_SNAPSHOT, IOCTL_SNAPSHOT_QUE_LOG,
-    telemetry::{Args, TelemetryEntry},
+    AWAIT_PSO, IOCTL_DRAIN_LOG_SNAPSHOT, IOCTL_SNAPSHOT_QUE_LOG, telemetry::TelemetryEntry,
 };
 use wdk::{nt_success, println};
-use wdk_mutex::{errors::DriverMutexError, fast_mutex::FastMutex};
 use wdk_sys::{
     _IO_STACK_LOCATION, DEVICE_OBJECT, IO_NO_INCREMENT, NTSTATUS, PIRP, SL_PENDING_RETURNED,
     STATUS_BAD_DATA, STATUS_BUFFER_ALL_ZEROS, STATUS_BUFFER_TOO_SMALL, STATUS_INVALID_BUFFER_SIZE,
     STATUS_INVALID_PARAMETER, STATUS_NOT_SUPPORTED, STATUS_PENDING, STATUS_SUCCESS,
     STATUS_UNSUCCESSFUL,
-    ntddk::{IoCsqInsertIrp, IoCsqInsertIrpEx, IofCompleteRequest, RtlCopyMemoryNonTemporal},
+    ntddk::{IoCsqInsertIrpEx, IofCompleteRequest, RtlCopyMemoryNonTemporal},
 };
 
 use crate::{
-    SCIL_DRIVER_EXT, ScilDriverExtension, csq::CsqInsertIrp, ffi::IoGetCurrentIrpStackLocation,
-    scil_telemetry::SnapshottedTelemetryLog,
+    SCIL_DRIVER_EXT, ffi::IoGetCurrentIrpStackLocation, scil_telemetry::SnapshottedTelemetryLog,
 };
 
 pub unsafe extern "C" fn handle_ioctl(device: *mut DEVICE_OBJECT, pirp: PIRP) -> NTSTATUS {
@@ -157,7 +153,7 @@ unsafe fn queue_pso_ioctl(ioctl_buffer: IoctlBuffer, _p_device: *mut DEVICE_OBJE
             .OutputBufferLength
     } as usize;
 
-    if user_buf_len < size_of::<Args>() {
+    if user_buf_len < size_of::<TelemetryEntry>() {
         println!("[scil] [-] User buffer was too small.");
         unsafe { (*ioctl_buffer.pirp).IoStatus.__bindgen_anon_1.Status = STATUS_BUFFER_TOO_SMALL };
         unsafe { IofCompleteRequest(ioctl_buffer.pirp, IO_NO_INCREMENT as i8) };

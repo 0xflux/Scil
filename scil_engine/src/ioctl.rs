@@ -1,8 +1,7 @@
 use std::ffi::c_void;
 
 use shared::{
-    AWAIT_PSO, IOCTL_DRAIN_LOG_SNAPSHOT, IOCTL_SNAPSHOT_QUE_LOG,
-    telemetry::{Args, TelemetryEntry},
+    AWAIT_PSO, IOCTL_DRAIN_LOG_SNAPSHOT, IOCTL_SNAPSHOT_QUE_LOG, telemetry::TelemetryEntry,
 };
 use windows::{
     Win32::{
@@ -16,7 +15,7 @@ use windows::{
 };
 
 pub struct QueuedIoctl {
-    pub out: Args,
+    pub out: TelemetryEntry,
     pub overlapped: OVERLAPPED,
     pub event: HANDLE,
 }
@@ -25,7 +24,7 @@ pub fn queue_ioctl(device: HANDLE) -> Result<Option<Box<QueuedIoctl>>, windows::
     let event = unsafe { CreateEventW(None, false, false, None)? };
 
     let mut b = Box::new(QueuedIoctl {
-        out: Args::default(),
+        out: TelemetryEntry::default(),
         overlapped: OVERLAPPED::default(),
         event,
     });
@@ -39,7 +38,7 @@ pub fn queue_ioctl(device: HANDLE) -> Result<Option<Box<QueuedIoctl>>, windows::
             None,
             0,
             Some(&mut b.out as *mut _ as _),
-            size_of::<Args>() as u32,
+            size_of::<TelemetryEntry>() as u32,
             None,
             Some(&mut b.overlapped),
         )

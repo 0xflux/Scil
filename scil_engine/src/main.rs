@@ -1,6 +1,6 @@
 use std::{collections::VecDeque, iter::once};
 
-use shared::{DRIVER_NAME, telemetry::Args};
+use shared::{DRIVER_NAME, telemetry::TelemetryEntry};
 use windows::{
     Win32::{
         Foundation::{CloseHandle, GENERIC_ALL, HANDLE, WAIT_OBJECT_0},
@@ -21,7 +21,7 @@ use crate::ioctl::{QueuedIoctl, drain_driver_messages, queue_ioctl};
 mod ioctl;
 
 fn main() {
-    println!("Starting SCIL engine..");
+    println!("[i] Starting SCIL engine..");
     run_engine();
 }
 
@@ -83,7 +83,7 @@ fn driver_name() -> Vec<u16> {
 fn monitor_driver_intercept(
     device: HANDLE,
     pending: &mut VecDeque<Box<QueuedIoctl>>,
-) -> Result<Vec<Args>, windows::core::Error> {
+) -> Result<Vec<TelemetryEntry>, windows::core::Error> {
     let mut completed = Vec::new();
 
     while let Some(taken) = pending.pop_front() {
