@@ -20,8 +20,8 @@ use wdk_sys::{
     _KTRAP_FRAME,
     _KWAIT_REASON::Executive,
     _MODE::KernelMode,
-    DISPATCH_LEVEL, FALSE, IO_NO_INCREMENT, KEVENT, KTRAP_FRAME, LARGE_INTEGER, PASSIVE_LEVEL,
-    STATUS_SUCCESS, TRUE,
+    DISPATCH_LEVEL, FALSE, IO_NO_INCREMENT, KEVENT, KTRAP_FRAME, LARGE_INTEGER, STATUS_SUCCESS,
+    TRUE,
     ntddk::{
         IoCsqRemoveNextIrp, IofCompleteRequest, KeDelayExecutionThread, KeGetCurrentIrql,
         KeInitializeEvent, KeSetEvent, KeWaitForSingleObject, RtlCopyMemoryNonTemporal,

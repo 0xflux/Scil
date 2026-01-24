@@ -182,10 +182,6 @@ unsafe fn queue_pso_ioctl(ioctl_buffer: IoctlBuffer, _p_device: *mut DEVICE_OBJE
             .fetch_add(1, Ordering::SeqCst);
     }
 
-    println!("[scil] [i] Queued IRPs after: {}", unsafe {
-        (*p_device_ext).num_queued_irps.load(Ordering::SeqCst)
-    });
-
     IoMarkIrpPending(ioctl_buffer.pirp);
     unsafe { (*ioctl_buffer.pirp).IoStatus.__bindgen_anon_1.Status = STATUS_PENDING };
 
