@@ -1,3 +1,7 @@
+use core::default;
+
+use uuid::Uuid;
+
 #[repr(C)]
 #[derive(Debug, Default)]
 pub struct TelemetryEntry {
@@ -48,4 +52,18 @@ pub fn ssn_to_nt_function(ssn: u32) -> Option<NtFunction> {
         SSN_NT_WRITE_VM => Some(NtFunction::NtWriteVM),
         _ => None,
     }
+}
+
+#[derive(Default, Debug)]
+pub enum SyscallAllowed {
+    #[default]
+    Yes,
+    No,
+}
+
+#[repr(C)]
+#[derive(Default)]
+pub struct EdrResult {
+    pub uuid: Uuid,
+    pub allowed: SyscallAllowed,
 }

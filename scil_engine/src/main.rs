@@ -1,6 +1,9 @@
 use std::{collections::VecDeque, iter::once};
 
-use shared::{DRIVER_NAME, telemetry::TelemetryEntry};
+use shared::{
+    DRIVER_NAME,
+    telemetry::{EdrResult, SyscallAllowed, TelemetryEntry},
+};
 use windows::{
     Win32::{
         Foundation::{CloseHandle, GENERIC_ALL, HANDLE, WAIT_OBJECT_0},
@@ -16,7 +19,7 @@ use windows::{
     core::PCWSTR,
 };
 
-use crate::ioctl::{QueuedIoctl, drain_driver_messages, queue_ioctl};
+use crate::ioctl::{QueuedIoctl, drain_driver_messages, queue_ioctl, send_result_ioctl};
 
 mod ioctl;
 
@@ -101,7 +104,18 @@ fn monitor_driver_intercept(
             let _ = CloseHandle(taken.event);
         }
 
-        println!("GOT COMPLETED: {:#?}", taken.out);
+        println!(
+            "[i] Received intercepted syscall from process: {} function: {:?}, uuid: {}",
+            taken.out.pid, taken.out.nt_function, taken.out.uuid
+        );
+
+        println!("[i] Sending result to driver to release syscall.");
+        let result = EdrResult {
+            uuid: taken.out.uuid,
+            allowed: SyscallAllowed::Yes,
+        };
+        send_result_ioctl(device, result);
+
         completed.push(taken.out);
 
         //

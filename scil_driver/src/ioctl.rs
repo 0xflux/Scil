@@ -1,19 +1,24 @@
 use core::{ffi::c_void, ptr::null_mut, sync::atomic::Ordering};
 
 use shared::{
-    AWAIT_PSO, IOCTL_DRAIN_LOG_SNAPSHOT, IOCTL_SNAPSHOT_QUE_LOG, telemetry::TelemetryEntry,
+    AWAIT_PSO, IOCTL_COMPLETE_SYSCALL, IOCTL_DRAIN_LOG_SNAPSHOT, IOCTL_SNAPSHOT_QUE_LOG,
+    telemetry::{EdrResult, TelemetryEntry},
 };
 use wdk::{nt_success, println};
 use wdk_sys::{
-    _IO_STACK_LOCATION, DEVICE_OBJECT, IO_NO_INCREMENT, NTSTATUS, PIRP, SL_PENDING_RETURNED,
-    STATUS_BAD_DATA, STATUS_BUFFER_ALL_ZEROS, STATUS_BUFFER_TOO_SMALL, STATUS_INVALID_BUFFER_SIZE,
-    STATUS_INVALID_PARAMETER, STATUS_NOT_SUPPORTED, STATUS_PENDING, STATUS_SUCCESS,
-    STATUS_UNSUCCESSFUL,
-    ntddk::{IoCsqInsertIrpEx, IofCompleteRequest, RtlCopyMemoryNonTemporal},
+    _IO_STACK_LOCATION, DEVICE_OBJECT, DISPATCH_LEVEL, FALSE, IO_NO_INCREMENT, NTSTATUS, PIRP,
+    SL_PENDING_RETURNED, STATUS_BAD_DATA, STATUS_BUFFER_ALL_ZEROS, STATUS_BUFFER_TOO_SMALL,
+    STATUS_INVALID_BUFFER_SIZE, STATUS_INVALID_PARAMETER, STATUS_NOT_SUPPORTED, STATUS_PENDING,
+    STATUS_SUCCESS, STATUS_UNSUCCESSFUL,
+    ntddk::{
+        IoCsqInsertIrpEx, IofCompleteRequest, KeGetCurrentIrql, KeSetEvent,
+        RtlCopyMemoryNonTemporal,
+    },
 };
 
 use crate::{
-    SCIL_DRIVER_EXT, ffi::IoGetCurrentIrpStackLocation, scil_telemetry::SnapshottedTelemetryLog,
+    SCIL_DRIVER_EXT, alt_syscalls::SYSCALL_SUSPEND_POOL, ffi::IoGetCurrentIrpStackLocation,
+    scil_telemetry::SnapshottedTelemetryLog,
 };
 
 pub unsafe extern "C" fn handle_ioctl(device: *mut DEVICE_OBJECT, pirp: PIRP) -> NTSTATUS {
@@ -35,6 +40,36 @@ pub unsafe extern "C" fn handle_ioctl(device: *mut DEVICE_OBJECT, pirp: PIRP) ->
 
     let return_status =
         match unsafe { (*p_stack_location).Parameters.DeviceIoControl.IoControlCode } {
+            IOCTL_COMPLETE_SYSCALL => {
+                let input_data = ioctl_buffer.buf as *mut c_void as *mut EdrResult;
+                if input_data.is_null() {
+                    println!("[scil] [-] Input buffer was null in IOCTL_COMPLETE_SYSCALL.");
+                    unsafe { IofCompleteRequest(pirp, IO_NO_INCREMENT as i8) };
+                    return STATUS_INVALID_BUFFER_SIZE;
+                }
+
+                let result = unsafe { &*input_data };
+
+                let p = SYSCALL_SUSPEND_POOL.load(Ordering::SeqCst);
+                if !p.is_null() {
+                    unsafe {
+                        let mut lock = (*p).lock().unwrap();
+                        if let Some(event) = lock.get_mut(&result.uuid) {
+                            if KeGetCurrentIrql() <= DISPATCH_LEVEL as u8 {
+                                KeSetEvent(*event, IO_NO_INCREMENT as _, FALSE as _);
+                            } else {
+                                println!(
+                                    "[scil] [-] Could not complete event uid: {}, IRQL too high.",
+                                    result.uuid
+                                );
+                            }
+                        }
+                    }
+                    STATUS_SUCCESS
+                } else {
+                    STATUS_BAD_DATA
+                }
+            }
             IOCTL_SNAPSHOT_QUE_LOG => {
                 let count_items = match SnapshottedTelemetryLog::take_snapshot() {
                     Ok(r) => r,

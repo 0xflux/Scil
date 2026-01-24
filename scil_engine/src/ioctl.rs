@@ -1,7 +1,8 @@
 use std::ffi::c_void;
 
 use shared::{
-    AWAIT_PSO, IOCTL_DRAIN_LOG_SNAPSHOT, IOCTL_SNAPSHOT_QUE_LOG, telemetry::TelemetryEntry,
+    AWAIT_PSO, IOCTL_COMPLETE_SYSCALL, IOCTL_DRAIN_LOG_SNAPSHOT, IOCTL_SNAPSHOT_QUE_LOG,
+    telemetry::{EdrResult, TelemetryEntry},
 };
 use windows::{
     Win32::{
@@ -18,6 +19,23 @@ pub struct QueuedIoctl {
     pub out: TelemetryEntry,
     pub overlapped: OVERLAPPED,
     pub event: HANDLE,
+}
+
+pub fn send_result_ioctl(device: HANDLE, data: EdrResult) {
+    if let Err(e) = unsafe {
+        DeviceIoControl(
+            device,
+            IOCTL_COMPLETE_SYSCALL,
+            Some(&data as *const _ as *const _),
+            size_of::<EdrResult>() as u32,
+            None,
+            0,
+            None,
+            None,
+        )
+    } {
+        println!("[-] Failed to make IOCTL for IOCTL_COMPLETE_SYSCALL. {e}");
+    };
 }
 
 pub fn queue_ioctl(device: HANDLE) -> Result<Option<Box<QueuedIoctl>>, windows::core::Error> {
