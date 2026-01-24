@@ -23,7 +23,7 @@ thiserror = { version = "2.0.17", default-features = false }
 uuid = { version = "1.19.0", features = ["v4", "serde"], default-features = false }
 wdk = "0.4.1"
 wdk-alloc = "0.4"
-wdk-mutex = "1.3.1"
+wdk-mutex = "1.3.2"
 wdk-panic = "0.4"
 wdk-sys = "0.5"
 shared = { path = "../shared" }
