@@ -1,20 +1,37 @@
 //! For enabling / disabling alt syscalls
 
-use core::{arch::asm, ffi::c_void, ptr::null_mut, sync::atomic::Ordering};
+use core::{
+    arch::asm,
+    ffi::c_void,
+    ptr::null_mut,
+    sync::atomic::{AtomicPtr, Ordering},
+};
 
+use alloc::{boxed::Box, collections::btree_map::BTreeMap};
 use shared::telemetry::{
-    Args, NtFunction, SSN_NT_ALLOCATE_VIRTUAL_MEMORY, SSN_NT_CREATE_THREAD_EX, SSN_NT_OPEN_PROCESS,
+    Args, SSN_NT_ALLOCATE_VIRTUAL_MEMORY, SSN_NT_CREATE_THREAD_EX, SSN_NT_OPEN_PROCESS,
     SSN_NT_WRITE_VM, TelemetryEntry, ssn_to_nt_function,
 };
-use wdk::println;
+use uuid::Uuid;
+use wdk::{nt_success, println};
+use wdk_mutex::fast_mutex::FastMutex;
 use wdk_sys::{
-    _EVENT_TYPE::NotificationEvent,
-    _KTRAP_FRAME, FALSE, IO_NO_INCREMENT, KEVENT, KTRAP_FRAME, STATUS_SUCCESS,
-    ntddk::{IoCsqRemoveNextIrp, IofCompleteRequest, KeInitializeEvent, RtlCopyMemoryNonTemporal},
+    _EVENT_TYPE::SynchronizationEvent,
+    _KTRAP_FRAME,
+    _KWAIT_REASON::Executive,
+    _MODE::KernelMode,
+    DISPATCH_LEVEL, FALSE, IO_NO_INCREMENT, KEVENT, KTRAP_FRAME, LARGE_INTEGER, PASSIVE_LEVEL,
+    STATUS_SUCCESS, TRUE,
+    ntddk::{
+        IoCsqRemoveNextIrp, IofCompleteRequest, KeDelayExecutionThread, KeGetCurrentIrql,
+        KeInitializeEvent, KeSetEvent, KeWaitForSingleObject, RtlCopyMemoryNonTemporal,
+    },
 };
 
 use crate::{
-    SCIL_DRIVER_EXT, scil_telemetry::TelemetryEntryOrphan, utils::get_process_name_and_pid,
+    SCIL_DRIVER_EXT,
+    scil_telemetry::TelemetryEntryOrphan,
+    utils::{DriverError, get_process_name_and_pid},
 };
 
 const NT_OPEN_FILE: u32 = 0x0033;
@@ -24,8 +41,71 @@ const NT_DEVICE_IO_CONTROL_FILE: u32 = 0x0007;
 const NT_CREATE_FILE_SSN: u32 = 0x0055;
 const NT_TRACE_EVENT_SSN: u32 = 0x005e;
 
-/// A local definition of a KTHREAD, seeing as though the WDK doesn't export one for us. If this changes
-/// between kernel builds, it will cause problems :E
+pub type SyscallSuspendedPool = FastMutex<BTreeMap<Uuid, *mut KEVENT>>;
+
+pub static SYSCALL_SUSPEND_POOL: AtomicPtr<SyscallSuspendedPool> = AtomicPtr::new(null_mut());
+
+pub fn init_syscall_suspended_pool() -> Result<(), DriverError> {
+    if SYSCALL_SUSPEND_POOL.load(Ordering::SeqCst).is_null() {
+        let inner =
+            SyscallSuspendedPool::new(BTreeMap::new()).map_err(|_| DriverError::MutexError)?;
+
+        let boxed = Box::new(inner);
+        let p_boxed = Box::into_raw(boxed);
+
+        SYSCALL_SUSPEND_POOL.store(p_boxed, Ordering::SeqCst);
+    }
+
+    Ok(())
+}
+
+/// Drops the data owned by `SYSCALL_SUSPEND_POOL` and safely completes all threads such that the
+/// system will not crash when the driver is stopped.
+pub fn drop_syscall_suspended_pool() {
+    let irql = unsafe { KeGetCurrentIrql() };
+    let p = SYSCALL_SUSPEND_POOL.load(Ordering::SeqCst);
+
+    if irql <= DISPATCH_LEVEL as u8 {
+        if !p.is_null() {
+            //
+            // Allow all threads to resume by enumerating the waiting objects
+            //
+
+            let lock = unsafe { (*p).lock().unwrap() };
+            for (_k, event) in (*lock).clone() {
+                unsafe {
+                    KeSetEvent(event, IO_NO_INCREMENT as _, FALSE as _);
+                }
+            }
+
+            drop(lock);
+
+            //
+            // guard against use after frees by waiting until all trapped syscalls are completed
+            //
+            loop {
+                let lock = unsafe { (*p).lock().unwrap() };
+                if lock.is_empty() {
+                    break;
+                }
+                drop(lock);
+
+                println!("[scil] [i] Lock was not empty");
+                unsafe {
+                    let mut li = LARGE_INTEGER::default();
+                    li.QuadPart = -10_000_000;
+                    let _ = KeDelayExecutionThread(KernelMode as _, FALSE as _, &mut li);
+                }
+            }
+        }
+    } else {
+        println!("[scil] [-] Bad IRQL when clearing syscall queue: {irql}");
+    }
+
+    let b = unsafe { Box::from_raw(p) };
+    drop(b);
+}
+
 #[repr(C)]
 struct KThreadLocalDef {
     junk: [u8; 0x90],
@@ -112,7 +192,6 @@ pub unsafe extern "system" fn syscall_handler(
                     )
                 };
                 unsafe { (*pirp).IoStatus.__bindgen_anon_1.Status = STATUS_SUCCESS };
-                unsafe { IofCompleteRequest(pirp, IO_NO_INCREMENT as i8) };
 
                 //
                 // Here we deal with suspending the thread using a NotificationEvent type of KEVENT,
@@ -121,10 +200,71 @@ pub unsafe extern "system" fn syscall_handler(
                 // jam. We can coordinate this by sticking the event into the pool and tracking the event
                 // based on the event UUID we generated.
                 //
-                // let mut k = KEVENT::default();
-                // unsafe {
-                //     KeInitializeEvent(&mut k, NotificationEvent, FALSE as u8);
-                // }
+                let mut k = KEVENT::default();
+                unsafe {
+                    KeInitializeEvent(&raw mut k, SynchronizationEvent, FALSE as u8);
+
+                    {
+                        let p_lock = SYSCALL_SUSPEND_POOL.load(Ordering::SeqCst);
+                        if p_lock.is_null() {
+                            println!(
+                                "[scil] [-] SYSCALL_SUSPEND_POOL was null in syscall hot path!"
+                            );
+                            return SYSCALL_ALLOW;
+                        }
+                        let mut lock = match (*p_lock).lock() {
+                            Ok(l) => l,
+                            Err(e) => {
+                                println!("[scil] [-] Failed to lock mtx in hot path. {e:?}");
+                                return SYSCALL_ALLOW;
+                            }
+                        };
+
+                        // Add the GUID and event into the pool
+                        lock.insert(te.uuid, &raw mut k);
+                    }
+
+                    // Make sure we complete the request AFTER we insert the sync object to prevent a
+                    // race
+                    IofCompleteRequest(pirp, IO_NO_INCREMENT as i8);
+
+                    println!("[scil] [i] Now waiting on single object for SSN: {ssn:#X}");
+
+                    let status = KeWaitForSingleObject(
+                        &raw mut k as *mut _ as *mut _,
+                        Executive as _,
+                        KernelMode as _,
+                        TRUE as _,
+                        null_mut(),
+                    );
+
+                    {
+                        let p_lock = SYSCALL_SUSPEND_POOL.load(Ordering::SeqCst);
+                        if p_lock.is_null() {
+                            println!(
+                                "[scil] [-] SYSCALL_SUSPEND_POOL was null in syscall hot path after KeWait!"
+                            );
+                            return SYSCALL_ALLOW;
+                        }
+                        let mut lock = match (*p_lock).lock() {
+                            Ok(l) => l,
+                            Err(e) => {
+                                println!(
+                                    "[scil] [-] Failed to lock mtx in hot path after KeWait. {e:?}"
+                                );
+                                return SYSCALL_ALLOW;
+                            }
+                        };
+
+                        lock.remove(&te.uuid);
+                    }
+
+                    if !nt_success(status) {
+                        println!("[scil] [-] KeWait failed with sts: {status:#X}, ssn: {ssn:#X}");
+                    }
+
+                    println!("[scil] [+] Wait finished ssn: {ssn:#X}");
+                }
             }
         }
         _ => (),

@@ -46,6 +46,6 @@ pub fn ssn_to_nt_function(ssn: u32) -> Option<NtFunction> {
         SSN_NT_ALLOCATE_VIRTUAL_MEMORY => Some(NtFunction::NtAllocateVM),
         SSN_NT_CREATE_THREAD_EX => Some(NtFunction::NtCreateThreadEx),
         SSN_NT_WRITE_VM => Some(NtFunction::NtWriteVM),
-        _ => None
+        _ => None,
     }
 }

@@ -43,6 +43,7 @@ use wdk_alloc::WdkAllocator;
 
 use crate::{
     alt_syscall_utils::AltSyscalls,
+    alt_syscalls::{drop_syscall_suspended_pool, init_syscall_suspended_pool},
     callbacks::{image_load_callback, thread_callback},
     csq::{
         CsqAcquireLock, CsqCompleteCanceledIrp, CsqInsertIrp, CsqPeekNextIrp, CsqReleaseLock,
@@ -97,6 +98,13 @@ pub unsafe extern "system" fn driver_entry(
         return STATUS_UNSUCCESSFUL;
     }
 
+    // Set up an atomic ptr mutex for the main syscall hot path
+    if init_syscall_suspended_pool().is_err() {
+        println!("Error calling init_syscall_suspended_pool!");
+        driver_exit(driver);
+        return STATUS_UNSUCCESSFUL;
+    }
+
     // Set up the telemetry system
     if let Err(e) = TelemetryCache::new() {
         println!("[scil] [-] Failed to create Telemetry Cache. {e:?}");
@@ -139,6 +147,8 @@ extern "C" fn driver_exit(driver: *mut DRIVER_OBJECT) {
         let p = unsafe { Box::from_raw(raw_p) };
         drop(p);
     }
+
+    drop_syscall_suspended_pool();
 
     //
     // Delete the driver object
