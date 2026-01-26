@@ -6,12 +6,13 @@ use shared::{
 };
 use windows::{
     Win32::{
-        Foundation::{CloseHandle, GENERIC_ALL, HANDLE, MAX_PATH, WAIT_OBJECT_0},
+        Foundation::{CloseHandle, GENERIC_ALL, GetLastError, HANDLE, MAX_PATH, WAIT_OBJECT_0},
         Storage::FileSystem::{
             CreateFileW, FILE_ATTRIBUTE_SYSTEM, FILE_FLAG_OVERLAPPED, FILE_SHARE_NONE,
             OPEN_EXISTING,
         },
         System::{
+            Diagnostics::Debug::ReadProcessMemory,
             IO::GetOverlappedResult,
             ProcessStatus::GetModuleFileNameExA,
             Threading::{OpenProcess, PROCESS_ALL_ACCESS, Sleep, WaitForSingleObject},
@@ -103,10 +104,10 @@ fn monitor_driver_intercept(
             let _ = CloseHandle(taken.event);
         }
 
-        println!(
-            "[i] Received intercepted syscall from process: {} function: {:?}, uuid: {}",
-            taken.out.pid, taken.out.nt_function, taken.out.uuid
-        );
+        // println!(
+        //     "[i] Received intercepted syscall from process: {} function: {:?}, uuid: {}",
+        //     taken.out.pid, taken.out.nt_function, taken.out.uuid
+        // );
 
         match taken.out.nt_function {
             NtFunction::NtOpenProcess(pid) => {
@@ -123,10 +124,45 @@ fn monitor_driver_intercept(
                     }
                 }
             }
+            NtFunction::NtWriteVM((p_buf, sz)) => {
+                println!("[i] Received event for NTWVM. p_buf: {p_buf:p}, sz: {sz}");
+                let pid = taken.out.pid;
+                unsafe {
+                    let Ok(h_process) = OpenProcess(PROCESS_ALL_ACCESS, false, pid) else {
+                        println!("[-] Could not open process, {:#X}", GetLastError().0);
+                        break;
+                    };
+
+                    let mut buf = Vec::<u8>::with_capacity(sz);
+                    let mut out_sz = 0;
+                    if let Err(e) = ReadProcessMemory(
+                        h_process,
+                        p_buf,
+                        buf.as_mut_ptr() as *mut u8 as _,
+                        sz,
+                        Some(&mut out_sz),
+                    ) {
+                        println!("[-] Error reading process memory of pid: {pid}: {e:?}");
+                        break;
+                    };
+
+                    buf.set_len(out_sz);
+
+                    if buf.starts_with(&[
+                        0x31, 0xdb, 0x64, 0x8b, 0x7b, 0x30, 0x8b, 0x7f, 0x0c, 0x8b, 0x7f, 0x1c,
+                        0x8b, 0x47, 0x08, 0x8b,
+                    ]) {
+                        println!("[!] Malware detected! Suspending process..");
+                        loop {
+                            Sleep(200);
+                        }
+                    }
+                }
+            }
             _ => (),
         }
 
-        println!("[i] Sending result to driver to release syscall.");
+        // println!("[i] Sending result to driver to release syscall.");
         let result = EdrResult {
             uuid: taken.out.uuid,
             allowed: SyscallAllowed::Yes,

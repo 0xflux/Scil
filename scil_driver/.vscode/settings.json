@@ -16,6 +16,7 @@
         "KTRAP",
         "ntddk",
         "NTSTATUS",
+        "NTWVM",
         "PCUNICODE",
         "PDEVICE",
         "PHANDLE",

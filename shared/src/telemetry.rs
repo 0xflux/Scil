@@ -1,4 +1,4 @@
-use core::default;
+use core::{default, ffi::c_void, ptr::null_mut};
 
 use uuid::Uuid;
 
@@ -13,6 +13,11 @@ pub struct TelemetryEntry {
     pub time: i64,
 }
 
+/// Inner type for NtWriteVirtualMemory:
+/// - Ptr to the allocation
+/// - Sz of allocation
+pub type NtWVMInner = (*const c_void, usize);
+
 #[repr(C)]
 #[derive(Debug, Default)]
 pub enum NtFunction {
@@ -20,7 +25,7 @@ pub enum NtFunction {
     #[default]
     NtAllocateVM,
     NtCreateThreadEx,
-    NtWriteVM,
+    NtWriteVM(NtWVMInner),
 }
 
 #[repr(C)]
@@ -49,7 +54,7 @@ pub fn ssn_to_nt_function(ssn: u32) -> Option<NtFunction> {
         SSN_NT_OPEN_PROCESS => Some(NtFunction::NtOpenProcess(0)),
         SSN_NT_ALLOCATE_VIRTUAL_MEMORY => Some(NtFunction::NtAllocateVM),
         SSN_NT_CREATE_THREAD_EX => Some(NtFunction::NtCreateThreadEx),
-        SSN_NT_WRITE_VM => Some(NtFunction::NtWriteVM),
+        SSN_NT_WRITE_VM => Some(NtFunction::NtWriteVM((null_mut(), 0))),
         _ => None,
     }
 }

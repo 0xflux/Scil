@@ -168,6 +168,12 @@ pub unsafe extern "system" fn syscall_handler(
                 } else {
                     NtFunction::NtOpenProcess(0)
                 }
+            } else if ssn == SSN_NT_WRITE_VM {
+                let p_buf = ktrap_frame.R8 as *const c_void;
+                let sz = ktrap_frame.R9 as usize;
+                println!("[scil] [i] NTWVM: p_buf: {:p}, sz of buf: {}", p_buf, sz);
+
+                NtFunction::NtWriteVM((p_buf, sz))
             } else {
                 nt_fn
             };
