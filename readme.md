@@ -10,7 +10,7 @@ only particular System Service Numbers to hook.
 
 Video demo of logging syscalls (YouTube):
 
-[![SCIL Logging Demo](https://img.youtube.com/vi/Xl5azIpD5Aw/0.jpg)](https://www.youtube.com/watch?v=Xl5azIpD5Aw)
+[![SCIL Logging Demo](https://img.youtube.com/vi/mFVhib6GG-o/0.jpg)](https://www.youtube.com/watch?v=mFVhib6GG-o)
 
 ## Architecture
 
