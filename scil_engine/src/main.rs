@@ -159,10 +159,21 @@ fn monitor_driver_intercept(
                     }
                 }
             }
+            NtFunction::NtContinue((ref _ctx, ref maybe_monitored_export)) => {
+                if let Some(export) = maybe_monitored_export {
+                    println!(
+                        "[!] Malware detected using Vectored Exception Handling to bypass execution of security intrinsic: {export:?}"
+                    );
+
+                    // EDR does EDR stuff here to contain, report, etc...
+                    loop {
+                        unsafe { Sleep(200) };
+                    }
+                }
+            }
             _ => (),
         }
 
-        // println!("[i] Sending result to driver to release syscall.");
         let result = EdrResult {
             uuid: taken.out.uuid,
             allowed: SyscallAllowed::Yes,

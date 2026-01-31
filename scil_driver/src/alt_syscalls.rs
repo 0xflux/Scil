@@ -2,14 +2,16 @@
 
 use core::{
     arch::asm,
-    ffi::c_void,
+    ffi::{CStr, c_void},
     ptr::null_mut,
+    slice,
     sync::atomic::{AtomicPtr, Ordering},
 };
 
-use alloc::{boxed::Box, collections::btree_map::BTreeMap};
+use alloc::{boxed::Box, collections::btree_map::BTreeMap, string::String};
 use shared::telemetry::{
-    Args, NtFunction, SSN_NT_ALLOCATE_VIRTUAL_MEMORY, SSN_NT_CREATE_THREAD_EX, SSN_NT_OPEN_PROCESS,
+    Args, MonitoredExports, NtFunction, PartialContext, SSN_NT_ALLOCATE_VIRTUAL_MEMORY,
+    SSN_NT_CONTINUE, SSN_NT_CONTINUE_EX, SSN_NT_CREATE_THREAD_EX, SSN_NT_OPEN_PROCESS,
     SSN_NT_WRITE_VM, TelemetryEntry, ssn_to_nt_function,
 };
 use uuid::Uuid;
@@ -19,12 +21,16 @@ use wdk_sys::{
     _EVENT_TYPE::SynchronizationEvent,
     _KTRAP_FRAME,
     _KWAIT_REASON::Executive,
+    _MEMORY_INFORMATION_CLASS::MemoryBasicInformation,
     _MODE::KernelMode,
-    CLIENT_ID, DISPATCH_LEVEL, FALSE, IO_NO_INCREMENT, KEVENT, KTRAP_FRAME, LARGE_INTEGER,
-    STATUS_SUCCESS, TRUE,
+    CLIENT_ID, DISPATCH_LEVEL, FALSE, IO_NO_INCREMENT, KAPC_STATE, KEVENT, KTRAP_FRAME,
+    LARGE_INTEGER, MEMORY_BASIC_INFORMATION, MEMORY_INFORMATION_CLASS, PROCESS_ALL_ACCESS,
+    PsProcessType, STATUS_SUCCESS, TRUE, UNICODE_STRING,
     ntddk::{
-        IoCsqRemoveNextIrp, IofCompleteRequest, KeDelayExecutionThread, KeGetCurrentIrql,
-        KeInitializeEvent, KeSetEvent, KeWaitForSingleObject, RtlCopyMemoryNonTemporal,
+        IoCsqRemoveNextIrp, IoGetCurrentProcess, IofCompleteRequest, KeDelayExecutionThread,
+        KeGetCurrentIrql, KeInitializeEvent, KeSetEvent, KeStackAttachProcess,
+        KeUnstackDetachProcess, KeWaitForSingleObject, ObOpenObjectByPointer,
+        RtlCopyMemoryNonTemporal, ZwClose, ZwQueryVirtualMemory,
     },
 };
 
@@ -153,11 +159,14 @@ pub unsafe extern "system" fn syscall_handler(
         SSN_NT_OPEN_PROCESS
         | SSN_NT_ALLOCATE_VIRTUAL_MEMORY
         | SSN_NT_WRITE_VM
+        | SSN_NT_CONTINUE
+        | SSN_NT_CONTINUE_EX
         | SSN_NT_CREATE_THREAD_EX => {
             let Some(nt_fn) = ssn_to_nt_function(ssn) else {
                 return SYSCALL_ALLOW;
             };
 
+            // TODO this whole `if else if` needs abstracting.
             let nt_fn = if ssn == SSN_NT_OPEN_PROCESS {
                 let p_client_id = ktrap_frame.R9 as *const CLIENT_ID;
                 if !p_client_id.is_null() {
@@ -168,10 +177,142 @@ pub unsafe extern "system" fn syscall_handler(
                 } else {
                     NtFunction::NtOpenProcess(0)
                 }
+            } else if ssn == SSN_NT_CONTINUE || ssn == SSN_NT_CONTINUE_EX {
+                unsafe {
+                    let p_ctx = ktrap_frame.Rcx as *const PartialContext;
+
+                    let p_process = IoGetCurrentProcess();
+                    let mut p_apc_state = KAPC_STATE::default();
+
+                    let mut context = PartialContext::default();
+
+                    KeStackAttachProcess(p_process, &mut p_apc_state);
+
+                    //
+                    // Copy the context out of the NtContinue arg1 such that we will be able to send it
+                    // back up to the user-mode EDR consumer.
+                    //
+
+                    RtlCopyMemoryNonTemporal(
+                        &mut context as *mut _ as *mut _,
+                        p_ctx as _,
+                        size_of::<PartialContext>() as u64,
+                    );
+
+                    // Note logical OR check, we can allow execution without returning it back to user mode
+                    if (context.Dr0 | context.Dr1 | context.Dr2 | context.Dr3) == 0 {
+                        KeUnstackDetachProcess(&mut p_apc_state);
+                        return SYSCALL_ALLOW;
+                    }
+
+                    //
+                    // It is easier for us to determine whether the address maps to one that us as the 'Scil'
+                    // would likely care about providing to an EDR vendor. We can use the Scil interface to
+                    // determine if it is a bad address, and if so, pass it up to the user-mode consumer, without
+                    // them having to do a lookup.
+                    //
+                    // For time saving - this should only be done where Dr0 - Dr3 is set for suspected VEH abuse.
+                    // That check is done above.
+                    //
+                    // DEMO NOTE: We are only checking the register `Dr0` here, that is to save on time as my free time
+                    // is precious. You can extend this by abstracting this into a function which checks all Dr0 - Dr3.
+                    //
+
+                    let mut handle = null_mut();
+                    let mut status = ObOpenObjectByPointer(
+                        p_process as _,
+                        0,
+                        null_mut(),
+                        PROCESS_ALL_ACCESS,
+                        *PsProcessType,
+                        KernelMode as i8,
+                        &mut handle,
+                    );
+
+                    if !nt_success(status) {
+                        println!(
+                            "[scil] [-] Failed to get a handle to the process. Error: {status:#X}"
+                        );
+                        KeUnstackDetachProcess(&mut p_apc_state);
+                        return SYSCALL_ALLOW;
+                    }
+
+                    let mut mem_info = MEMORY_BASIC_INFORMATION::default();
+                    let mut out_len: u64 = 0;
+
+                    status = ZwQueryVirtualMemory(
+                        handle,
+                        context.Dr0 as _,
+                        MemoryBasicInformation,
+                        &mut mem_info as *mut _ as *mut c_void,
+                        size_of::<MEMORY_BASIC_INFORMATION>() as u64,
+                        &mut out_len,
+                    );
+                    if !nt_success(status) {
+                        println!(
+                            "[scil] [-] Failed to call ZwQueryVirtualMemory. Error: {status:#X}"
+                        );
+                        KeUnstackDetachProcess(&mut p_apc_state);
+                        let _ = ZwClose(handle);
+                        return SYSCALL_ALLOW;
+                    }
+
+                    let mut out_len: u64 = 0;
+                    let mut path_buf = [0u8; 512];
+                    // source https://docs.rs/ntapi/latest/ntapi/ntmmapi/constant.MemoryMappedFilenameInformation.html
+                    #[allow(non_upper_case_globals)]
+                    const MemoryMappedFilenameInformation: MEMORY_INFORMATION_CLASS = 2;
+
+                    status = ZwQueryVirtualMemory(
+                        handle,
+                        context.Dr0 as _,
+                        MemoryMappedFilenameInformation,
+                        &mut path_buf as *mut _ as *mut c_void,
+                        path_buf.len() as u64,
+                        &mut out_len,
+                    );
+                    if !nt_success(status) {
+                        println!(
+                            "[scil] [-] Failed to call ZwQueryVirtualMemory 2nd time. Error: {status:#X}"
+                        );
+                        KeUnstackDetachProcess(&mut p_apc_state);
+                        let _ = ZwClose(handle);
+                        return SYSCALL_ALLOW;
+                    }
+
+                    let unicode = &*(path_buf.as_ptr() as *const UNICODE_STRING);
+
+                    let module_name = if unicode.Length != 0 {
+                        let s =
+                            slice::from_raw_parts(unicode.Buffer, (unicode.Length as usize) / 2);
+                        String::from_utf16_lossy(s)
+                    } else {
+                        String::from("Unknown")
+                    };
+
+                    // Note:
+                    // Here we would extend the `Scil` subsystem to an internal API which can check against not only AMSI,
+                    // but NTDLL, and any other exports & DLL's that the EDR wishes to register notification hooks for.
+                    // TODO that would be fun (?) to build as part of the subsystem.
+                    let mut maybe_abuse_function: Option<_> = None;
+                    if module_name.to_ascii_lowercase().ends_with("amsi.dll") {
+                        if let Some(name) = search_module_for_sensitive_addresses(
+                            mem_info.AllocationBase,
+                            context.Dr0 as *const _,
+                        ) {
+                            if name == "AmsiScanBuffer" {
+                                maybe_abuse_function = Some(MonitoredExports::AmsiScanBuffer)
+                            }
+                        }
+                    }
+
+                    KeUnstackDetachProcess(&mut p_apc_state);
+
+                    NtFunction::NtContinue((context, maybe_abuse_function))
+                }
             } else if ssn == SSN_NT_WRITE_VM {
                 let p_buf = ktrap_frame.R8 as *const c_void;
                 let sz = ktrap_frame.R9 as usize;
-                println!("[scil] [i] NTWVM: p_buf: {:p}, sz of buf: {}", p_buf, sz);
 
                 NtFunction::NtWriteVM((p_buf, sz))
             } else {
@@ -248,8 +389,6 @@ pub unsafe extern "system" fn syscall_handler(
                     // race
                     IofCompleteRequest(pirp, IO_NO_INCREMENT as i8);
 
-                    println!("[scil] [i] Now waiting on single object for SSN: {ssn:#X}");
-
                     let status = KeWaitForSingleObject(
                         &raw mut k as *mut _ as *mut _,
                         Executive as _,
@@ -282,8 +421,6 @@ pub unsafe extern "system" fn syscall_handler(
                     if !nt_success(status) {
                         println!("[scil] [-] KeWait failed with sts: {status:#X}, ssn: {ssn:#X}");
                     }
-
-                    println!("[scil] [+] Wait finished ssn: {ssn:#X}");
                 }
             }
         }
@@ -311,4 +448,67 @@ fn extract_trap() -> Option<*const _KTRAP_FRAME> {
     let p_ktrap = unsafe { &*(k_thread as *const KThreadLocalDef) }.k_trap_ptr;
 
     Some(p_ktrap)
+}
+
+unsafe extern "system" {
+
+    // https://codemachine.com/articles/top_ten_kernel_apis.html
+    fn RtlFindExportedRoutineByName(
+        dll_base: *const c_void,
+        routine_name: *const u8,
+    ) -> *const c_void;
+}
+
+const SENSITIVE_API_NAMES: [&[u8]; 5] = [
+    b"AmsiScanBuffer\0",
+    b"AmsiScanString\0",
+    b"EtwEventWrite\0",
+    b"EtwEventWriteFull\0",
+    b"NtTraceEvent\0",
+];
+
+/// Searches through a **mapped** module in memory for a series of pre-defined functions that are protected against
+/// Vectored Exception Handling abuse through the debug registers. This works against VEH^2 also which was researched
+/// first by CrowdStrike.
+///
+/// # Safety
+///
+/// This function **MUST** be called whilst attached to a process stack via `KeStackAttachProcess` or it will Bug Check.
+///
+/// # Args
+///
+/// - `allocation_base`: The base address of the module you wish to search, with it being a **mapped** image.
+/// - `target_address`: The address you are looking to see if it is a monitored, sensitive address.
+unsafe fn search_module_for_sensitive_addresses(
+    allocation_base: *const c_void,
+    target_address: *const c_void,
+) -> Option<String> {
+    // Some safety..
+    if allocation_base.is_null() || target_address.is_null() {
+        return None;
+    }
+
+    //
+    // Iterate through each API name we are monitoring and see if we get a match on the address
+    //
+    unsafe {
+        for name in SENSITIVE_API_NAMES {
+            let result = RtlFindExportedRoutineByName(allocation_base, name.as_ptr());
+            if result.is_null() {
+                continue;
+            }
+
+            //
+            // Check whether the debug register is set on our API of concern
+            //
+            if result == target_address {
+                let cstr = CStr::from_bytes_with_nul(name)
+                    .unwrap_or(CStr::from_bytes_with_nul(b"Unknown\0").unwrap());
+
+                return Some(cstr.to_string_lossy().into_owned());
+            }
+        }
+    }
+
+    None
 }
