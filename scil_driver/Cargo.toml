@@ -18,7 +18,7 @@ panic = "abort"
 lto = true
 
 [dependencies]
-rand = { version = "0.9.2", features = ["small_rng"], default-features = false }
+rand = { version = "0.9.3", features = ["small_rng"], default-features = false }
 thiserror = { version = "2.0.17", default-features = false }
 uuid = { version = "1.19.0", features = ["v4", "serde"], default-features = false }
 wdk = "0.4.1"
